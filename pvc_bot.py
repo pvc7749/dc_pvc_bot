@@ -1483,6 +1483,7 @@ async def on_message(message):
             "!抽裝備 : 消耗10萬點，隨機抽一件裝備\n"
             "!查庫存 : 查看所有擁有的裝備：ID、部位、稀有度、強化等級與屬性\n"
             "!屬性 : 查看自己的屬性，為各部位強化度最高的屬性加總\n"
+            "!燒 <ID> : 會將該ID裝備移除，並給予至少5萬點 (根據稀有度)\n"
             "!強化 <ID> : 強化該ID的裝備，基礎為10萬點，根據強化等級、稀有度而有所提升\n\n"
             "稀有度：N, H, R, SR, SSR, UR, MR, BR\n"
             "部位：頭盔、手套、胸甲、腿甲、褲襠甲、鞋子、武器、盾牌`"
@@ -1692,7 +1693,50 @@ async def on_message(message):
         except ValueError:
             await message.channel.send(f"{message.author.mention} 請提供正確的裝備 ID。")
 
+    # 燒裝備指令
+    if message.content.startswith("!燒 "):
+        try:
+            # 解析裝備 ID
+            equipment_id = int(message.content.split()[1])
+            user_id = message.author.id
 
+            # 檢查裝備是否存在
+            c.execute("""
+            SELECT equipment_name, rarity FROM user_equipment 
+            WHERE user_id = ? AND equipment_id = ?
+            """, (user_id, equipment_id))
+            equipment = c.fetchone()
+
+            if not equipment:
+                await message.channel.send(f"{message.author.mention} 找不到指定的裝備，請確認裝備 ID 是否正確。")
+                return
+
+            equipment_name, rarity = equipment
+
+            # 根據稀有度計算給予的點數
+            enhancement_multiplier = enhance_cost_rates.get(rarity, 1)  # 默認為 1（防止不存在的稀有度）
+            points_to_add = int(50000 * enhancement_multiplier)
+
+            # 更新用戶積分
+            c.execute("""
+            UPDATE user_points 
+            SET points = points + ? 
+            WHERE user_id = ?
+            """, (points_to_add, user_id))
+            conn.commit()
+
+            # 移除裝備
+            c.execute("""
+            DELETE FROM user_equipment 
+            WHERE user_id = ? AND equipment_id = ?
+            """, (user_id, equipment_id))
+            conn.commit()
+
+            # 回應訊息
+            await message.channel.send(f"{message.author.mention} 裝備 {equipment_name} 已被燒毀，你獲得 {points_to_add} 點積分。")
+    
+        except ValueError:
+            await message.channel.send(f"{message.author.mention} 請提供正確的裝備 ID。")
 
 
 

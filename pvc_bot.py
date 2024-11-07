@@ -1552,19 +1552,27 @@ async def on_message(message):
         equipment_list = c.fetchall()
 
         if equipment_list:
+            # 根據裝備名稱排序
+            equipment_list.sort(key=lambda x: x[1])  # 依照 equipment_name 排序
+
             # 建立回應訊息
             response_message = f"{message.author.mention} 你擁有以下裝備：\n"
+            previous_name = None  # 用來跟踪前一個裝備名稱
             for equip in equipment_list:
                 equipment_id, equipment_name, rarity, upgrade = equip[:4]
                 attributes = equip[4:]
                 attr_text = ", ".join([f"{attr} {value}" for attr, value in zip(
                     ["health", "mana", "stamina", "attack", "magic_attack", "defense", "magic_defense", "speed"], attributes) if value > 0])
+
+                # 當前裝備名稱與上一個不一樣時，顯示該裝備名稱
+                if equipment_name != previous_name:
+                    response_message += f"\n{equipment_name}:\n"
+                    previous_name = equipment_name  # 更新前一個名稱
             
                 response_message += (
-                f"裝備ID: {equipment_id} | 名稱: {equipment_name} | 稀有度: {rarity} | "
-                f"強化等級: {upgrade} | 屬性: {attr_text}\n"
+                    f"  裝備ID: {equipment_id} | 稀有度: {rarity} | 強化等級: {upgrade} | 屬性: {attr_text}\n"
                 )
-        
+
             await message.channel.send(response_message)
         else:
             await message.channel.send(f"{message.author.mention} 你目前沒有任何裝備。")

@@ -232,6 +232,8 @@ angel_immunity = {}
 # 地雷卡狀態
 landmine_status = {}
 
+cooldowns_pvc = {}
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -724,9 +726,18 @@ async def on_message(message):
         target_id = 597075277079773227  # 預設目標ID為固定的指定ID
         user_id = message.author.id
 
+                # 檢查冷卻時間
+        if user_id in cooldowns_pvc:
+            elapsed_time = cooldowns_pvc[user_id] - time.time()
+            if elapsed_time > 0:
+                await message.channel.send(f"{message.author.mention} 請稍候 {int(elapsed_time)} 秒後再試。")
+                return
+
         # 查詢使用者的當前點數
-        c.execute("SELECT points FROM user_points WHERE user_id = ?", (user_id,))
+        c.execute("SELECT points FROM user_points WHERE user_id = ?", (target_id,))
         result = c.fetchone()
+        c.execute("SELECT points FROM user_points WHERE user_id = ?", (user_id,))
+        result2 = c.fetchone()
 
         if result and result[0] > 0:
             current_points = result[0]
@@ -734,31 +745,19 @@ async def on_message(message):
 
             # 檢查是否有足夠的點數進行貢獻
             if contribution_points > 0:
-                # 扣除貢獻者的10%點數
-                new_user_points = current_points - contribution_points
+                # 10%點數
+                new_user_points = result2[0] + contribution_points
+                new_target_points = current_points - contribution_points
                 c.execute("UPDATE user_points SET points = ? WHERE user_id = ?", (new_user_points, user_id))
-
-                # 獲取目標使用者的點數並增加貢獻點數
-                c.execute("SELECT points FROM user_points WHERE user_id = ?", (target_id,))
-                target_result = c.fetchone()
-                
-                if target_result:
-                    new_target_points = target_result[0] + contribution_points
-                    c.execute("UPDATE user_points SET points = ? WHERE user_id = ?", (new_target_points, target_id))
-                else:
-                    # 若目標使用者沒有記錄，則新增記錄
-                    c.execute("INSERT INTO user_points (user_id, points) VALUES (?, ?)", (target_id, contribution_points))
-
+                c.execute("UPDATE user_points SET points = ? WHERE user_id = ?", (new_target_points, target_id))
                 # 提交變更
                 conn.commit()
 
                 await message.channel.send(
-                    f"{message.author.mention} 貢獻了 {contribution_points} 點數給 <@{target_id}>！"
+                    f"{message.author.mention} 獲得了PVC的10%點數 {contribution_points} 點！"
                 )
-            else:
-                await message.channel.send(f"{message.author.mention} 點數不足，無法貢獻。")
-        else:
-            await message.channel.send(f"{message.author.mention} 你目前沒有點數。")
+
+                cooldowns_pvc[user_id] = time.time() + 600  # 設置10分鐘冷卻
 
 
     # 處理 !乞丐 指令
@@ -1484,6 +1483,7 @@ async def on_message(message):
             "!查庫存 : 查看所有擁有的裝備：ID、部位、稀有度、強化等級與屬性\n"
             "!屬性 : 查看自己的屬性，為各部位強化度最高的屬性加總\n"
             "!燒 <ID> : 會將該ID裝備移除，並給予至少5萬點 (根據稀有度)\n"
+            "!燒爛 : 會將SR以下稀有度裝備移除，並給予至少5萬點 (根據稀有度)\n"
             "!強化 <ID> : 強化該ID的裝備，基礎為10萬點，根據強化等級、稀有度而有所提升\n\n"
             "稀有度：N, H, R, SR, SSR, UR, MR, BR\n"
             "部位：頭盔、手套、胸甲、腿甲、褲襠甲、鞋子、武器、盾牌`"
@@ -1552,8 +1552,11 @@ async def on_message(message):
         equipment_list = c.fetchall()
 
         if equipment_list:
+            # 稀有度排序順序（BR > MR > UR > SSR > SR > R > H > N）
+            rarity_order = {"BR": 0, "MR": 1, "UR": 2, "SSR": 3, "SR": 4, "R": 5, "H": 6, "N": 7}
+
             # 根據裝備名稱排序
-            equipment_list.sort(key=lambda x: x[1])  # 依照 equipment_name 排序
+            equipment_list.sort(key=lambda x: (x[1], rarity_order[x[2]], -x[3]))
 
             # 建立回應訊息
             response_message = f"{message.author.mention} 你擁有以下裝備：\n"
@@ -1572,6 +1575,11 @@ async def on_message(message):
                 response_message += (
                     f"  裝備ID: {equipment_id} | 稀有度: {rarity} | 強化等級: {upgrade} | 屬性: {attr_text}\n"
                 )
+
+                # 每當訊息接近 2000 字符時發送一次
+                if len(response_message) > 1900:
+                    await message.channel.send(response_message)
+                    response_message = ""  # 重置訊息
 
             await message.channel.send(response_message)
         else:
@@ -1745,6 +1753,45 @@ async def on_message(message):
     
         except ValueError:
             await message.channel.send(f"{message.author.mention} 請提供正確的裝備 ID。")
+
+    if message.content == "!燒爛":
+        user_id = message.author.id
+    
+        # 定義要燒毀的稀有度
+        target_rarities = ["SR", "R", "H", "N"]
+    
+        # 查詢該使用者符合條件的裝備
+        c.execute("""
+        SELECT equipment_id, rarity
+        FROM user_equipment
+        WHERE user_id = ? AND rarity IN (?, ?, ?, ?)
+        """, (user_id, *target_rarities))
+        equipment_to_burn = c.fetchall()
+    
+        if equipment_to_burn:
+            total_points = 0
+        
+            # 計算總返還點數
+            for equip in equipment_to_burn:
+                equipment_id, rarity = equip
+                total_points += int(50000 * enhance_cost_rates[rarity])
+            
+                # 刪除該裝備
+                c.execute("""
+                DELETE FROM user_equipment WHERE equipment_id = ?
+                """, (equipment_id,))
+        
+            # 更新使用者點數
+            c.execute("""
+            UPDATE user_points SET points = points + ? WHERE user_id = ?
+            """, (total_points, user_id))
+            conn.commit()
+        
+            await message.channel.send(f"{message.author.mention} 已燒毀所有 SR、R、H、N 裝備，並獲得 {total_points} 點積分。")
+        else:
+            await message.channel.send(f"{message.author.mention} 你沒有任何 SR、R、H、N 裝備可燒。")
+
+
 
 
 

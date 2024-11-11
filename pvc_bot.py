@@ -8,6 +8,8 @@ import asyncio  # 確保導入 asyncio
 import random
 import sqlite3
 import time
+import math
+
 
 
 # 啟用所需的 intents
@@ -21,6 +23,10 @@ TOKEN = '123'  # 在這裡放入你的 Bot Token
 # 連接到SQLite資料庫
 conn = sqlite3.connect("points.db")
 c = conn.cursor()
+
+# 格式化數值：每三位數加逗號
+def format_number(num):
+    return f"{num:,}"
 
 # 建立分數儲存表
 c.execute("""
@@ -84,6 +90,7 @@ equipment_slots = [
     {"equipment_name": "褲襠甲"},
     {"equipment_name": "鞋子"},
     {"equipment_name": "武器"},
+    {"equipment_name": "副武"},
     {"equipment_name": "盾牌"}
 ]
 
@@ -96,6 +103,7 @@ equipment_attributes = {
     "腿甲": ["magic_defense", "defense", "stamina"],  # 腿甲屬性：魔防、防禦、精力
     "鞋子": ["speed", "mana", "health"],  # 鞋子屬性：速度、魔力、生命
     "武器": ["attack", "magic_attack", "speed"],  # 武器屬性：攻擊、魔攻、速度
+    "副武": ["attack", "magic_attack", "magic_defense"],  # 武器屬性：攻擊、魔攻、魔防
     "盾牌": ["health", "defense", "magic_defense"]  # 盾牌屬性：生命、防禦、魔防
 }
 
@@ -233,6 +241,7 @@ angel_immunity = {}
 landmine_status = {}
 
 cooldowns_pvc = {}
+cooldowns_fight = {}
 
 @bot.event
 async def on_message(message):
@@ -749,7 +758,6 @@ async def on_message(message):
                 new_user_points = result2[0] + contribution_points
                 new_target_points = current_points - contribution_points
                 c.execute("UPDATE user_points SET points = ? WHERE user_id = ?", (new_user_points, user_id))
-                c.execute("UPDATE user_points SET points = ? WHERE user_id = ?", (new_target_points, target_id))
                 # 提交變更
                 conn.commit()
 
@@ -757,7 +765,7 @@ async def on_message(message):
                     f"{message.author.mention} 獲得了PVC的10%點數 {contribution_points} 點！"
                 )
 
-                cooldowns_pvc[user_id] = time.time() + 600  # 設置10分鐘冷卻
+                cooldowns_pvc[user_id] = time.time() + 60  # 設置10分鐘冷卻
 
 
     # 處理 !乞丐 指令
@@ -1479,66 +1487,83 @@ async def on_message(message):
     if message.content == "!裝備指令":
         response = (
             "` \n"
-            "!抽裝備 : 消耗10萬點，隨機抽一件裝備\n"
+            "!PVC : 獲得PVC 10%的點數\n"
+            "!怪物 <數值> : 自動對戰全屬性為<數值>的怪物，獲勝能根據<數值>獲得點數獎勵\n\n"
+            "!抽裝備 <部位> : 消耗10萬點，隨機抽一件裝備\n"
             "!查庫存 : 查看所有擁有的裝備：ID、部位、稀有度、強化等級與屬性\n"
             "!屬性 : 查看自己的屬性，為各部位強化度最高的屬性加總\n"
-            "!燒 <ID> : 會將該ID裝備移除，並給予至少5萬點 (根據稀有度)\n"
+            "!燒 <ID> <ID> ... : 會將該ID裝備移除，並給予至少5萬點 (根據稀有度)\n"
             "!燒爛 : 會將SR以下稀有度裝備移除，並給予至少5萬點 (根據稀有度)\n"
-            "!強化 <ID> : 強化該ID的裝備，基礎為10萬點，根據強化等級、稀有度而有所提升\n\n"
+            "!強化 <ID> <次數> : 強化該ID的裝備，基礎為10萬點，根據強化等級、稀有度而有所提升\n\n"
             "稀有度：N, H, R, SR, SSR, UR, MR, BR\n"
-            "部位：頭盔、手套、胸甲、腿甲、褲襠甲、鞋子、武器、盾牌`"
+            "部位：頭盔、手套、胸甲、腿甲、褲襠甲、鞋子、武器、副武、盾牌`"
         )
         await message.channel.send(response)
 
-    if message.content == "!抽裝備":
+    # 抽裝備指令
+    if message.content.startswith("!抽裝備"):
+        args = message.content.split()
         user_id = message.author.id
 
         # 檢查用戶積分是否足夠
         c.execute("SELECT points FROM user_points WHERE user_id = ?", (user_id,))
         result = c.fetchone()
-    
-        if result and result[0] >= 100000:
-            c.execute("UPDATE user_points SET points = points - 100000 WHERE user_id = ?", (user_id,))
-            conn.commit()
-        
-            # 隨機選擇一個裝備
-            slot = random.choice(equipment_slots)
-            equipment_name = slot["equipment_name"]
-        
-            # 隨機選擇稀有度
-            rarity = random.choices(
-                [level["rarity"] for level in rarity_levels], 
-                weights=rarity_probabilities, 
-                k=1
-            )[0]
-        
-            # 取得稀有度對應屬性範圍
-            rarity_level = next(level for level in rarity_levels if level["rarity"] == rarity)
-            min_attr, max_attr = rarity_level["min_attr"], rarity_level["max_attr"]
-        
-            # 根據屬性類型隨機生成數值
-            attributes = equipment_attributes[equipment_name]
-            stats = {attr: random.randint(min_attr, max_attr) for attr in attributes}
-        
-            # 插入新裝備
-            c.execute("""
-            INSERT INTO user_equipment (user_id, equipment_name, rarity, health, mana, stamina, attack, magic_attack, defense, magic_defense, speed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, equipment_name, rarity, 
-                  stats.get("health", 0), stats.get("mana", 0), stats.get("stamina", 0), 
-                  stats.get("attack", 0), stats.get("magic_attack", 0), 
-                  stats.get("defense", 0), stats.get("magic_defense", 0), stats.get("speed", 0)))
-            conn.commit()
-            equipment_id = c.lastrowid  # 取得自動生成的 equipment_id
-        
-            await message.channel.send(
-                f"{message.author.mention} 你抽到了裝備 {equipment_name}！\n"
-                f"裝備 ID: {equipment_id}\n"
-                f"稀有度: {rarity}\n"
-                f"屬性: {stats}"
-            )
-        else:
+
+        if not result or result[0] < 100000:
             await message.channel.send(f"{message.author.mention} 你的積分不足，無法抽取裝備！")
+            return
+
+        # 扣除抽裝備所需的積分
+        c.execute("UPDATE user_points SET points = points - 100000 WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+        # 確定要抽取的裝備部位
+        if len(args) > 1:
+            specified_slot = args[1]
+            # 提取所有有效的裝備部位名稱
+            valid_slots = [slot["equipment_name"] for slot in equipment_slots]
+            if specified_slot not in valid_slots:
+                await message.channel.send(f"{message.author.mention} 指定的裝備部位無效。有效部位包括：{', '.join(valid_slots)}。")
+                return
+            equipment_name = specified_slot
+        else:
+            # 隨機選擇一個裝備部位
+            equipment_name = random.choice(equipment_slots)["equipment_name"]
+
+        # 隨機選擇稀有度
+        rarity = random.choices(
+            [level["rarity"] for level in rarity_levels], 
+            weights=rarity_probabilities, 
+            k=1
+        )[0]
+
+        # 取得稀有度對應屬性範圍
+        rarity_level = next(level for level in rarity_levels if level["rarity"] == rarity)
+        min_attr, max_attr = rarity_level["min_attr"], rarity_level["max_attr"]
+
+        # 根據屬性類型隨機生成數值
+        attributes = equipment_attributes[equipment_name]
+        stats = {attr: random.randint(min_attr, max_attr) for attr in attributes}
+
+        # 插入新裝備
+        c.execute("""
+        INSERT INTO user_equipment (user_id, equipment_name, rarity, health, mana, stamina, attack, magic_attack, defense, magic_defense, speed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, equipment_name, rarity, 
+              stats.get("health", 0), stats.get("mana", 0), stats.get("stamina", 0), 
+              stats.get("attack", 0), stats.get("magic_attack", 0), 
+              stats.get("defense", 0), stats.get("magic_defense", 0), stats.get("speed", 0)))
+        conn.commit()
+        equipment_id = c.lastrowid  # 取得自動生成的 equipment_id
+
+        # 回應訊息
+        formatted_stats = "\n".join([f"{attr}: {value:,}" for attr, value in stats.items()])
+        await message.channel.send(
+            f"{message.author.mention} 你抽到了裝備 **{equipment_name}**！\n"
+            f"裝備 ID: {equipment_id}\n"
+            f"稀有度: **{rarity}**\n"
+            f"屬性：\n{formatted_stats}"
+        )
 
     if message.content == "!查庫存":
         user_id = message.author.id
@@ -1564,7 +1589,7 @@ async def on_message(message):
             for equip in equipment_list:
                 equipment_id, equipment_name, rarity, upgrade = equip[:4]
                 attributes = equip[4:]
-                attr_text = ", ".join([f"{attr} {value}" for attr, value in zip(
+                attr_text = ", ".join([f"{attr} {format_number(value)}" for attr, value in zip(
                     ["health", "mana", "stamina", "attack", "magic_attack", "defense", "magic_defense", "speed"], attributes) if value > 0])
 
                 # 當前裝備名稱與上一個不一樣時，顯示該裝備名稱
@@ -1585,8 +1610,16 @@ async def on_message(message):
         else:
             await message.channel.send(f"{message.author.mention} 你目前沒有任何裝備。")
 
-    if message.content == "!屬性":
-        user_id = message.author.id
+    if message.content.startswith("!屬性"):
+        args = message.content.split()
+        if len(args) == 1:
+            user_id = message.author.id  # 查詢自己
+        else:
+            try:
+                user_id = int(args[1])  # 查詢指定 user_id
+            except ValueError:
+                await message.channel.send(f"{message.author.mention} 請提供正確的使用者 ID。")
+                return
 
         # 查詢每個 equipment_name 中 upgrade 最高的裝備
         c.execute("""
@@ -1597,9 +1630,14 @@ async def on_message(message):
         """, (user_id,))
         best_equipment = c.fetchall()
 
+        user = await bot.fetch_user(user_id)  # 獲取用戶對象
+
         # 如果沒有任何裝備
         if not best_equipment:
-            await message.channel.send(f"{message.author.mention} 你目前沒有任何裝備。")
+            if user_id == message.author.id:
+                await message.channel.send(f"{message.author.mention} 你目前沒有任何裝備。")
+            else:
+                await message.channel.send(f"使用者 ID {user.display_name} 目前沒有任何裝備。")
             return
 
         # 查詢每個最高 upgrade 裝備的屬性
@@ -1616,25 +1654,38 @@ async def on_message(message):
             WHERE user_id = ? AND equipment_name = ? AND upgrade = ?
             LIMIT 1
             """, (user_id, equip_name, max_upgrade))
-        
+    
             attributes = c.fetchone()
             if attributes:
                 for i, key in enumerate(total_attributes.keys()):
                     total_attributes[key] += attributes[i]
 
         # 建立回應訊息
-        response_message = f"{message.author.mention} 你的屬性如下：\n"
-        response_message += "\n".join([f"{attr}: {value}" for attr, value in total_attributes.items()])
+        if user_id == message.author.id:
+            response_message = f"{message.author.mention} 你的屬性如下：\n"
+        else:
+            response_message = f"使用者 ID {user.display_name} 的屬性如下：\n"
+
+        response_message += "\n".join([f"{attr}: {format_number(value)}" for attr, value in total_attributes.items()])
         await message.channel.send(response_message)
 
     # 強化指令
     if message.content.startswith("!強化 "):
         try:
-            # 解析裝備 ID
-            equipment_id = int(message.content.split()[1])
+            parts = message.content.split()
+            if len(parts) < 3:
+                await message.channel.send(f"{message.author.mention} 使用方法：!強化 <裝備ID> <次數>（最高 20 次）")
+                return
+
+            equipment_id = int(parts[1])
+            times = int(parts[2])
+            if times <= 0 or times > 20:
+                await message.channel.send(f"{message.author.mention} 強化次數必須介於 1 到 20 次之間。")
+                return
+
             user_id = message.author.id
 
-            # 檢查裝備是否存在
+            # 查詢裝備
             c.execute("""
             SELECT equipment_name, rarity, upgrade, health, mana, stamina, attack, magic_attack, defense, magic_defense, speed 
             FROM user_equipment 
@@ -1646,113 +1697,125 @@ async def on_message(message):
                 await message.channel.send(f"{message.author.mention} 找不到指定的裝備，請確認裝備 ID 是否正確。")
                 return
 
-            equipment_name, rarity, upgrade, health, mana, stamina, attack, magic_attack, defense, magic_defense, speed = equipment
+            equipment_name, rarity, upgrade, *attributes = equipment
+            total_cost = 0
+            success_count = 0
 
-            # 計算強化所需積分
-            upgrade_multiplier = 1.1 ** upgrade
-            enhancement_multiplier = enhance_cost_rates[rarity]
-            enhancement_cost = int(100000 * upgrade_multiplier * enhancement_multiplier)  # 基本強化費用
-        
-            # 稀有度的強化成功率，根據 upgrade 值每次減少 5% 成功機率
-            success_rate = enhance_success_rates[rarity] - (upgrade * 0.05)
-            success_rate = max(success_rate, 0.05)  # 最低成功率為 5%
-            success_rate_percent = int(success_rate*100)
+            for _ in range(times):
+                # 計算強化費用與成功率
+                upgrade_multiplier = 1.1 ** upgrade
+                enhancement_multiplier = enhance_cost_rates[rarity]
+                enhancement_cost = int(100000 * upgrade_multiplier * enhancement_multiplier)
+                success_rate = max(enhance_success_rates[rarity] - (upgrade * 0.05), 0.05)
 
-            # 檢查是否有足夠的積分
-            c.execute("""
-            SELECT points FROM user_points WHERE user_id = ?
-            """, (user_id,))
-            current_points = c.fetchone()
+                # 獲取當前積分
+                c.execute("SELECT points FROM user_points WHERE user_id = ?", (user_id,))
+                current_points = c.fetchone()
 
-            if current_points is None or current_points[0] < enhancement_cost:
-                await message.channel.send(f"{message.author.mention} 你的積分不足，目前需要: {enhancement_cost} 點積分。")
-                return
-            else:
+                if current_points is None or current_points[0] < enhancement_cost:
+                    await message.channel.send(f"{message.author.mention} 你的積分不足，目前需要: {enhancement_cost} 點積分。")
+                    break
+
                 # 扣除積分
-                c.execute("""
-                UPDATE user_points SET points = points - ?
-                WHERE user_id = ?
-                """, (enhancement_cost, user_id))
+                total_cost += enhancement_cost
+                c.execute("UPDATE user_points SET points = points - ? WHERE user_id = ?", (enhancement_cost, user_id))
                 conn.commit()
 
-            # 隨機判斷強化是否成功
-            if random.random() <= success_rate:               
+                # 強化結果
+                if random.random() <= success_rate:
+                    upgrade += 1
+                    success_count += 1
+                    attributes = [int(attr * enhancement_multiplier * 1.1) for attr in attributes]
 
-                # 增加 upgrade
-                new_upgrade = upgrade + 1
+                    # 更新裝備
+                    c.execute("""
+                    UPDATE user_equipment 
+                    SET upgrade = ?, health = ?, mana = ?, stamina = ?, attack = ?, magic_attack = ?, 
+                        defense = ?, magic_defense = ?, speed = ?
+                    WHERE user_id = ? AND equipment_id = ?
+                    """, (upgrade, *attributes, user_id, equipment_id))
+                    conn.commit()
 
-                # 強化後，所有屬性 +10%
-                new_health = int(health * enhancement_multiplier * 1.1)
-                new_mana = int(mana * enhancement_multiplier * 1.1)
-                new_stamina = int(stamina * enhancement_multiplier * 1.1)
-                new_attack = int(attack * enhancement_multiplier * 1.1)
-                new_magic_attack = int(magic_attack * enhancement_multiplier * 1.1)
-                new_defense = int(defense * enhancement_multiplier * 1.1)
-                new_magic_defense = int(magic_defense * enhancement_multiplier * 1.1)
-                new_speed = int(speed * enhancement_multiplier * 1.1)
+                # 更新成功率
+                success_rate_percent = int(success_rate * 100)
 
-                # 更新裝備資料
-                c.execute("""
-                UPDATE user_equipment 
-                SET upgrade = ?, health = ?, mana = ?, stamina = ?, attack = ?, magic_attack = ?, 
-                    defense = ?, magic_defense = ?, speed = ?
-                WHERE user_id = ? AND equipment_id = ?
-                """, (new_upgrade, new_health, new_mana, new_stamina, new_attack, new_magic_attack, 
-                      new_defense, new_magic_defense, new_speed, user_id, equipment_id))
-                conn.commit()
-
-                await message.channel.send(f"{message.author.mention} 機率 {success_rate_percent}% 強化成功！\n裝備 {equipment_name} 強化至 {new_upgrade} 級。屬性已增加 10%。")
+            # 發送結果訊息
+            if success_count > 0:
+                await message.channel.send(
+                    f"{message.author.mention} 強化 {times} 次中 {success_count} 次成功！\n"
+                    f"裝備 {equipment_name} 現在為 {upgrade} 級，屬性已提升。"
+                )
             else:
-                # 強化失敗
-                await message.channel.send(f"{message.author.mention} 機率 {success_rate_percent}% 強化失敗，裝備 {equipment_name} 依然保持原狀。")
-    
+                await message.channel.send(
+                    f"{message.author.mention} 強化 {times} 次全部失敗，裝備 {equipment_name} 仍為 {upgrade} 級。"
+                )
+
         except ValueError:
-            await message.channel.send(f"{message.author.mention} 請提供正確的裝備 ID。")
+            await message.channel.send(f"{message.author.mention} 請提供正確的裝備 ID 和強化次數。")
 
     # 燒裝備指令
     if message.content.startswith("!燒 "):
         try:
-            # 解析裝備 ID
-            equipment_id = int(message.content.split()[1])
+            # 解析裝備 ID 列表
+            equipment_ids = list(map(int, message.content.split()[1:]))
             user_id = message.author.id
-
-            # 檢查裝備是否存在
-            c.execute("""
-            SELECT equipment_name, rarity FROM user_equipment 
-            WHERE user_id = ? AND equipment_id = ?
-            """, (user_id, equipment_id))
-            equipment = c.fetchone()
-
-            if not equipment:
-                await message.channel.send(f"{message.author.mention} 找不到指定的裝備，請確認裝備 ID 是否正確。")
+        
+            if not equipment_ids:
+                await message.channel.send(f"{message.author.mention} 請提供至少一個裝備 ID。")
                 return
 
-            equipment_name, rarity = equipment
+            total_points = 0
+            failed_ids = []
+            success_count = 0
+            burned_equipment_names = []
 
-            # 根據稀有度計算給予的點數
-            enhancement_multiplier = enhance_cost_rates.get(rarity, 1)  # 默認為 1（防止不存在的稀有度）
-            points_to_add = int(50000 * enhancement_multiplier)
+            for equipment_id in equipment_ids:
+                # 檢查裝備是否存在
+                c.execute("""
+                SELECT equipment_name, rarity FROM user_equipment 
+                WHERE user_id = ? AND equipment_id = ?
+                """, (user_id, equipment_id))
+                equipment = c.fetchone()
+
+                if not equipment:
+                    failed_ids.append(str(equipment_id))
+                    continue
+
+                equipment_name, rarity = equipment
+
+                # 計算給予的點數
+                enhancement_multiplier = enhance_cost_rates.get(rarity, 1)  # 默認為 1
+                points_to_add = int(50000 * enhancement_multiplier)
+                total_points += points_to_add
+                burned_equipment_names.append(equipment_name)
+
+                # 移除裝備
+                c.execute("""
+                DELETE FROM user_equipment 
+                WHERE user_id = ? AND equipment_id = ?
+                """, (user_id, equipment_id))
+                success_count += 1
 
             # 更新用戶積分
-            c.execute("""
-            UPDATE user_points 
-            SET points = points + ? 
-            WHERE user_id = ?
-            """, (points_to_add, user_id))
+            if total_points > 0:
+                c.execute("""
+                UPDATE user_points 
+                SET points = points + ? 
+                WHERE user_id = ?
+                """, (total_points, user_id))
             conn.commit()
 
-            # 移除裝備
-            c.execute("""
-            DELETE FROM user_equipment 
-            WHERE user_id = ? AND equipment_id = ?
-            """, (user_id, equipment_id))
-            conn.commit()
+            # 構建回應訊息
+            response_message = f"{message.author.mention} 已成功燒毀 {success_count} 件裝備，獲得 {total_points:,} 點積分。\n"
+            if burned_equipment_names:
+                response_message += "燒毀的裝備：\n" + ", ".join(burned_equipment_names) + "\n"
+            if failed_ids:
+                response_message += "以下裝備 ID 無法找到或燒毀失敗：\n" + ", ".join(failed_ids)
 
-            # 回應訊息
-            await message.channel.send(f"{message.author.mention} 裝備 {equipment_name} 已被燒毀，你獲得 {points_to_add} 點積分。")
-    
+            await message.channel.send(response_message)
+
         except ValueError:
-            await message.channel.send(f"{message.author.mention} 請提供正確的裝備 ID。")
+            await message.channel.send(f"{message.author.mention} 請提供正確的裝備 ID（使用空格分隔多個 ID）。")
 
     if message.content == "!燒爛":
         user_id = message.author.id
@@ -1791,7 +1854,175 @@ async def on_message(message):
         else:
             await message.channel.send(f"{message.author.mention} 你沒有任何 SR、R、H、N 裝備可燒。")
 
+    if message.content.startswith("!怪物"):
 
+        if user_id in cooldowns_fight:
+            elapsed_time = cooldowns_fight[user_id] - time.time()
+            if elapsed_time > 0:
+                await message.channel.send(f"{message.author.mention} 請稍候 {int(elapsed_time)} 秒後再試。")
+                return
+
+        try:
+            monster_value = int(message.content.split()[1])
+            if monster_value <= 0:
+                await message.channel.send(f"{message.author.mention} 請輸入一個正數的怪物數值。")
+                return
+        except (IndexError, ValueError):
+            await message.channel.send(f"{message.author.mention} 請輸入正確的怪物數值。")
+            return
+
+        user_id = message.author.id
+
+        # 查詢每個 equipment_name 中 upgrade 最高的裝備
+        c.execute("""
+        SELECT equipment_name, MAX(upgrade) as max_upgrade
+        FROM user_equipment
+        WHERE user_id = ?
+        GROUP BY equipment_name
+        """, (user_id,))
+        best_equipment = c.fetchall()
+
+        # 如果沒有任何裝備，則提示並退出
+        if not best_equipment:
+            await message.channel.send(f"{message.author.mention} 你沒有任何裝備，無法對戰。")
+            return
+
+        # 查詢每個最高 upgrade 裝備的屬性
+        user_attributes = {
+            "health": 0, "mana": 0, "stamina": 0, "attack": 0,
+            "magic_attack": 0, "defense": 0, "magic_defense": 0, "speed": 0
+        }
+
+        for equip_name, max_upgrade in best_equipment:
+            c.execute("""
+            SELECT health, mana, stamina, attack, magic_attack, 
+                   defense, magic_defense, speed
+            FROM user_equipment
+            WHERE user_id = ? AND equipment_name = ? AND upgrade = ?
+            LIMIT 1
+            """, (user_id, equip_name, max_upgrade))
+
+            attributes = c.fetchone()
+            if attributes:
+                for i, key in enumerate(user_attributes.keys()):
+                    user_attributes[key] += attributes[i]
+
+
+        # 使用者與怪物的屬性
+        user_health, user_mana, user_stamina, user_attack, user_magic_attack, user_defense, user_magic_defense, user_speed = (
+            int(user_attributes[attr]) for attr in user_attributes
+        )
+        monster_health = monster_value
+        monster_attributes = {
+            "health": monster_value,
+            "mana": monster_value,
+            "stamina": monster_value,
+            "attack": monster_value,
+            "magic_attack": monster_value,
+            "defense": monster_value,
+            "magic_defense": monster_value,
+            "speed": monster_value
+        }
+
+        battle_log = f"{message.author.mention} vs 怪物（屬性：{format_number(monster_value)}）\n\n"
+        user_current_health = int(user_health)
+        monster_current_health = int(monster_health)
+        fight_round = 0
+
+        def calculate_damage(attack, attacker_stat, defender_stat):
+            return attack * attacker_stat / (attacker_stat + defender_stat) / 10
+
+        def dodge_chance(attacker_speed, defender_speed):
+            return attacker_speed / (attacker_speed + defender_speed) / 3
+
+        while user_current_health > 0 and monster_current_health > 0:
+            # 決定玩家攻擊類型
+            attack_type = random.choices(
+                ["normal", "magic", "critical", "ultimate"],
+                [0.3, 0.3, 0.3, 0.1]
+            )[0]
+
+            fight_round += 1
+            battle_log += f"⚔️回合{fight_round} \n"
+
+            if attack_type == "normal":
+                damage = int(calculate_damage(user_attack, user_attack, monster_attributes["defense"]))
+                battle_log += f"你使用普通攻擊🗡️，造成 {format_number(damage)} 點傷害。\t"
+            elif attack_type == "magic" and user_mana >= 0.2 * user_attributes["mana"]:
+                mana_cost = 0.2 * user_attributes["mana"]
+                damage = int(calculate_damage(user_magic_attack, user_magic_attack, monster_attributes["magic_defense"]) * math.log10(mana_cost/2))
+                user_mana -= mana_cost
+                battle_log += f"你使用魔法攻擊🧙，造成 {format_number(damage)} 點傷害。\t"
+            elif attack_type == "critical" and user_stamina >= 0.2 * user_attributes["stamina"]:
+                stamina_cost = 0.2 * user_attributes["stamina"]
+                damage = int(calculate_damage(user_attack, user_attack, monster_attributes["defense"]) * math.log10(stamina_cost/2) / 2)
+                user_stamina -= stamina_cost
+                battle_log += f"你使用射擊攻擊🏹，造成 {format_number(damage)} 點傷害。\t"
+            elif attack_type == "ultimate":
+                stamina_cost = 0.2 * user_attributes["stamina"]
+                mana_cost = 0.2 * user_attributes["mana"]
+                damage = int(calculate_damage(user_attack, user_attack, monster_attributes["defense"]) * math.log10(stamina_cost/2) * math.log10(mana_cost/2) / 2)
+                battle_log += f"你使用終極攻擊🎆，造成 {format_number(damage)} 點傷害。\t"
+            else:
+                damage = int(calculate_damage(user_attack, user_attack, monster_attributes["defense"]))
+                battle_log += f"你使用普通攻擊⚔️，造成 {format_number(damage)} 點傷害。\t"
+
+            # 判斷怪物是否閃躲
+            if random.random() < dodge_chance(monster_attributes["speed"], user_speed):
+                battle_log += "🦥怪物閃避了你的攻擊！\n"
+            else:
+                monster_current_health -= damage
+                monster_current_health_percent = int(monster_current_health/monster_value*100)
+                battle_log += f"👾怪物剩餘血量：{monster_current_health_percent}% ({format_number(monster_current_health)})\n"
+
+            if monster_current_health <= 0:
+                break
+
+            # 決定怪物攻擊類型
+            attack_type_monster = random.choices(
+                ["normal", "magic"],
+                [0.5, 0.5]
+            )[0]
+
+            if attack_type_monster == "normal":
+                monster_damage = int(calculate_damage(monster_attributes["attack"], monster_attributes["attack"], user_defense))
+                battle_log += f"怪物攻擊你，造成 {format_number(monster_damage)} 點傷害。\t"
+            elif attack_type_monster == "magic" and monster_attributes["mana"] >= 0.5 * monster_value:
+                mana_cost = 0.5 * monster_value
+                monster_damage = int(calculate_damage(monster_attributes["magic_attack"], monster_attributes["magic_attack"], user_magic_defense) * math.log10(mana_cost / 5)/3)
+                monster_attributes["mana"] -= mana_cost
+                battle_log += f"怪物用魔法攻擊，造成 {format_number(monster_damage)} 點傷害。\t"
+            else:
+                monster_damage = int(calculate_damage(monster_attributes["attack"], monster_attributes["attack"], user_defense))
+                battle_log += f"怪物攻擊你，造成 {format_number(monster_damage)} 點傷害。\t"
+ 
+            
+            if random.random() < dodge_chance(user_speed, monster_attributes["speed"]):
+                battle_log += "🤺你閃避了怪物的攻擊！\n"
+            else:
+                user_current_health -= monster_damage
+                user_current_health_percent = int(user_current_health/user_health*100)
+                battle_log += f"🍉你的剩餘血量：{user_current_health_percent}% ({format_number(user_current_health)})\n"
+
+            # 每當訊息接近 2000 字符時發送一次
+                if len(battle_log) > 1800:
+                    await message.channel.send(battle_log)
+                    battle_log = ""  # 重置訊息
+
+        # 戰鬥結束
+        if user_current_health > 0:
+            reward_points = int(math.log(monster_value) * 1_000_000)
+            c.execute("""
+            UPDATE user_points SET points = points + ? WHERE user_id = ?
+            """, (reward_points, user_id))
+            conn.commit()
+            formatted_points = f"{reward_points:,}"  # 將點數格式化為帶逗號的字符串
+            battle_log += f"\n你擊敗了怪物！獲得 {formatted_points} 點數獎勵。"
+        else:
+            battle_log += "\n你被怪物擊敗了！"
+
+        await message.channel.send(battle_log)
+        cooldowns_fight[user_id] = time.time() + 60  # 設置10分鐘冷卻
 
 
 
